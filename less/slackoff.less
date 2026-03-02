@@ -1,0 +1,182 @@
+/*
+ * slackoff.less → static/css/slackoff.css
+ *
+ * Styles for the Slack Off privacy feature.
+ * Loaded alongside write.css in the pad editor (pad.tmpl).
+ *
+ * Layout strategy
+ * ---------------
+ * #slack-mirror is a non-interactive div positioned identically to #writer
+ * (the textarea). When Slack Off is enabled:
+ *   - #writer becomes transparent so only the cursor/selection is visible.
+ *   - #slack-mirror renders the actual content followed by non-selectable
+ *     lorem ipsum filler on each line, giving visual noise to onlookers.
+ *
+ * Because both elements use `position: fixed` with the same coordinates and
+ * #slack-mirror precedes #writer in the DOM, the textarea always sits on top
+ * and receives all user interaction without needing explicit z-index values.
+ *
+ * Compile
+ * -------
+ *   cd less && make slackoff
+ */
+
+@import "resources";   // @serifFont, @sansFont, @monoFont
+
+// Colours — mirror the values defined in pad-theme.less.
+@soLightBG:   #ffffff;
+@soLightText: #000000;
+@soDarkBG:    #222222;
+@soDarkText:  #ffffff;
+
+// Default filler opacity — also the initial value for the JS slider.
+@soFillerOpacity: 0.6;
+
+// ---------------------------------------------------------------------------
+// Responsive padding mixin
+// Keeps the mirror's horizontal padding in sync with write.css breakpoints.
+// Applied twice: once for the default mirror, once for the mono variant.
+// ---------------------------------------------------------------------------
+.so-responsive-padding() {
+	@media all and (min-width: 50em)  { padding-left: 10%;  padding-right: 10%;  }
+	@media all and (min-width: 60em)  { padding-left: 15%;  padding-right: 15%;  }
+	@media all and (min-width: 70em)  { padding-left: 20%;  padding-right: 20%;  }
+	@media all and (min-width: 85em)  { padding-left: 25%;  padding-right: 25%;  }
+	@media all and (min-width: 105em) { padding-left: 30%;  padding-right: 30%;  }
+}
+
+// ---------------------------------------------------------------------------
+// Mirror div
+// ---------------------------------------------------------------------------
+body#pad {
+	#slack-mirror {
+		display: none;           // hidden by default; JS shows it on enable()
+		position: fixed;
+		top: 3em;
+		right: 0;
+		bottom: 0;
+		left: 0;
+		padding: 1em 2em 2em;
+		font-size: 1.2em;
+		letter-spacing: 0.6px;
+		line-height: 1.4;
+		font-family: @serifFont;  // default; overridden by .norm/.sans/.wrap below
+		white-space: pre-wrap;    // preserves hard newlines from the textarea
+		word-wrap: break-word;
+		overflow: hidden;         // hides scrollbar; scroll position driven by JS
+		box-sizing: border-box;
+
+		// Non-interactive — clicks and selections pass through to #writer.
+		pointer-events: none;
+		user-select: none;
+		-webkit-user-select: none;
+		-moz-user-select: none;
+		-ms-user-select: none;
+
+		// CSS custom property used by .so-filler; JS overrides via setProperty.
+		--so-filler-opacity: @soFillerOpacity;
+
+		.so-responsive-padding();
+
+		// Font variants — match the class names applied to #writer by pad.tmpl.
+		&.sans {
+			font-family: @sansFont;
+		}
+		&.wrap, &.mono, &.code {
+			font-family: @monoFont;
+			padding-left: 1em;
+			padding-right: 1em;
+			white-space: pre;
+			word-wrap: normal;
+			.so-responsive-padding();
+		}
+
+		// Filler spans — dimmer than actual text up close, invisible difference
+		// from a distance. Opacity is driven by the CSS custom property above so
+		// a single JS setProperty() call refreshes every span at once.
+		.so-filler {
+			opacity: var(--so-filler-opacity, @soFillerOpacity);
+		}
+	}
+
+	// Theme colours — must match the textarea colours in pad-theme.less.
+	&.light #slack-mirror {
+		background-color: @soLightBG;
+		color: @soLightText;
+	}
+	&.dark #slack-mirror {
+		background-color: @soDarkBG;
+		color: @soDarkText;
+	}
+
+	// Textarea in active mode — text invisible, cursor and selection remain.
+	&.light #writer.so-writer {
+		color: transparent;
+		background: transparent;
+		caret-color: @soLightText;
+	}
+	&.dark #writer.so-writer {
+		color: transparent;
+		background: transparent;
+		caret-color: @soDarkText;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar icon
+// ---------------------------------------------------------------------------
+#slackoff-icon {
+	vertical-align: middle;
+	font-size: 24px;
+	line-height: 1;
+
+	// Stays fully visible when active, even when the toolbar is at low opacity,
+	// giving a clear indicator that privacy mode is on.
+	&.so-active {
+		opacity: 1 !important;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dropdown controls
+// ---------------------------------------------------------------------------
+#slackoff-nav {
+	// Enable checkbox row — comfortable label with inline checkbox.
+	label {
+		display: flex;
+		align-items: center;
+		gap: 0.5em;
+		padding: 0 0.5em;
+		cursor: pointer;
+		line-height: 2em;
+		white-space: nowrap;
+	}
+
+	// Suppress hover highlight on the label row; the label handles it.
+	li:has(label):hover {
+		background: transparent;
+	}
+
+	// Opacity slider row.
+	#slackoff-opacity-row {
+		padding: 0.25em 0.5em 0.5em;
+		display: block;
+
+		&:hover {
+			background: transparent;
+		}
+	}
+}
+
+#slackoff-opacity {
+	width: 100%;
+	cursor: pointer;
+	display: block;
+}
+
+// Percentage label beside the "Opacity" heading.
+#slackoff-opacity-val {
+	font-weight: normal;
+	color: #888;
+	float: right;
+}
