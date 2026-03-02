@@ -95,28 +95,128 @@
     mirror: null   // the mirror div element
   };
 
+  /* Per-render caches — cleared when font, language, or viewport changes. */
+  var _soMeasurer    = null;  // hidden <span> for DOM-based text measurement
+  var _soWordWidths  = {};    // key: lang+'\0'+sep+word → px width (cached)
+  var _soAvailWidth  = -1;    // mirror content width in px (-1 = needs measure)
+  var _soFillerCache = {};    // key: lang+'\0'+lineContent → filler string
+
   /* -------------------------------------------------------------------------
-   * Random filler generation
+   * Filler generation — DOM-measured, per-line cached
    * ------------------------------------------------------------------------- */
-  function randomInt(min, max) {
-    return min + Math.floor(Math.random() * (max - min + 1));
+
+  function randomWord(bank) {
+    return bank[Math.floor(Math.random() * bank.length)];
   }
 
   /**
-   * Returns a string of random filler words/characters for the given language.
-   * @param {string} lang  Language key ('en', 'zh', …)
-   * @param {number} min   Minimum number of words/char-groups
-   * @param {number} max   Maximum number of words/char-groups
+   * Ensures the hidden measurer <span> exists in the document body.
+   * The element is positioned off-screen and is invisible and non-interactive.
    */
-  function generateFiller(lang, min, max) {
-    var bank = LOREM_BANKS[lang] || LOREM_BANKS['en'];
-    var count = randomInt(min, max);
-    var result = [];
-    for (var i = 0; i < count; i++) {
-      result.push(bank[Math.floor(Math.random() * bank.length)]);
+  function ensureMeasurer() {
+    if (_soMeasurer && _soMeasurer.parentNode) return;
+    _soMeasurer = document.createElement('span');
+    _soMeasurer.setAttribute('aria-hidden', 'true');
+    _soMeasurer.style.cssText =
+      'position:fixed;top:-9999px;left:-9999px;white-space:pre;' +
+      'visibility:hidden;pointer-events:none';
+    document.body.appendChild(_soMeasurer);
+  }
+
+  /**
+   * Copies the mirror div's computed font properties to the measurer span so
+   * that getBoundingClientRect measurements match rendered text exactly,
+   * including letter-spacing which canvas measureText ignores.
+   */
+  function syncMeasurerFont() {
+    ensureMeasurer();
+    var s = window.getComputedStyle(els.mirror);
+    _soMeasurer.style.fontFamily    = s.fontFamily;
+    _soMeasurer.style.fontSize      = s.fontSize;
+    _soMeasurer.style.fontWeight    = s.fontWeight;
+    _soMeasurer.style.fontStyle     = s.fontStyle;
+    _soMeasurer.style.letterSpacing = s.letterSpacing;
+  }
+
+  /** Returns the rendered pixel width of an arbitrary text string. */
+  function measureLinePx(text) {
+    _soMeasurer.textContent = text;
+    return _soMeasurer.getBoundingClientRect().width;
+  }
+
+  /**
+   * Returns the pixel width of sep+word, using a per-word cache to avoid
+   * repeated DOM queries for the same word during a single render pass.
+   */
+  function getWordWidth(word, sep) {
+    var key = state.language + '\x00' + sep + word;
+    if (_soWordWidths[key] === undefined) {
+      _soMeasurer.textContent = sep + word;
+      _soWordWidths[key] = _soMeasurer.getBoundingClientRect().width;
     }
-    /* Chinese characters need no separator; western words use spaces. */
-    return lang === 'zh' ? result.join('') : result.join(' ');
+    return _soWordWidths[key];
+  }
+
+  /**
+   * Returns the usable content width of the mirror div in pixels, i.e. its
+   * clientWidth minus horizontal padding. Cached until invalidated.
+   */
+  function getContentWidth() {
+    if (_soAvailWidth > 0) return _soAvailWidth;
+    if (!els.mirror) return 600;
+    var s = window.getComputedStyle(els.mirror);
+    _soAvailWidth = els.mirror.clientWidth
+      - (parseFloat(s.paddingLeft)  || 0)
+      - (parseFloat(s.paddingRight) || 0);
+    return _soAvailWidth;
+  }
+
+  /**
+   * Builds (or retrieves from cache) the filler string for one line.
+   * Returns '' for empty lines or lines that already fill the available width.
+   * The result is pixel-fitted: words are added until the next word would
+   * overflow the remaining space, so no filler wraps onto the next visual row.
+   */
+  function buildFiller(line) {
+    /* 1. No filler on empty lines. */
+    if (!line.trim()) return '';
+
+    /* 2. Return stable cached filler so unedited lines don't change. */
+    var cacheKey = state.language + '\x00' + line;
+    if (_soFillerCache[cacheKey] !== undefined) return _soFillerCache[cacheKey];
+
+    var bank      = LOREM_BANKS[state.language] || LOREM_BANKS['en'];
+    var isZh      = (state.language === 'zh');
+    var sep       = isZh ? '' : ' ';
+    /* 3. Measure how many words fit without overflowing the line.
+     *    A 4 px safety buffer absorbs subpixel rounding differences. */
+    var remaining = getContentWidth() - measureLinePx(line) - 4;
+
+    if (remaining <= 0) {
+      _soFillerCache[cacheKey] = '';
+      return '';
+    }
+
+    var words  = [];
+    var filled = 0;
+    for (var i = 0; i < 80; i++) {
+      var w  = randomWord(bank);
+      var px = getWordWidth(w, sep);
+      if (filled + px > remaining) break;
+      words.push(w);
+      filled += px;
+    }
+
+    var result = words.length > 0 ? (sep + words.join(sep)) : '';
+    _soFillerCache[cacheKey] = result;
+    return result;
+  }
+
+  /** Clears all measurement and filler caches (call on font/language/resize). */
+  function invalidateCaches() {
+    _soWordWidths  = {};
+    _soAvailWidth  = -1;
+    _soFillerCache = {};
   }
 
   /* -------------------------------------------------------------------------
@@ -137,6 +237,9 @@
     /* Sync font class so mirror matches the textarea's current typeface. */
     mirror.className = 'so-mirror ' + (els.writer.className || '');
 
+    /* Sync the DOM measurer's font so measurements match the mirror's typeface. */
+    syncMeasurerFont();
+
     /* Clear previous children efficiently. */
     while (mirror.firstChild) {
       mirror.removeChild(mirror.firstChild);
@@ -150,13 +253,17 @@
       actualSpan.textContent = lines[i];
       mirror.appendChild(actualSpan);
 
-      /* Filler span – appended on the same visual row as the actual text.
-       * Filler quantity is randomised per line so patterns are not obvious. */
-      var fillerSpan = document.createElement('span');
-      fillerSpan.className = 'so-filler';
-      var prefix = (state.language === 'zh') ? '' : ' ';
-      fillerSpan.textContent = prefix + generateFiller(state.language, 5, 14);
-      mirror.appendChild(fillerSpan);
+      /* Filler span — pixel-fitted and cached so:
+       *   • empty lines get no filler,
+       *   • unedited lines keep stable filler,
+       *   • filler never wraps onto the next visual row. */
+      var filler = buildFiller(lines[i]);
+      if (filler) {
+        var fillerSpan = document.createElement('span');
+        fillerSpan.className = 'so-filler';
+        fillerSpan.textContent = filler;
+        mirror.appendChild(fillerSpan);
+      }
 
       /* Hard line break (skip after final line to avoid trailing blank line). */
       if (i < lines.length - 1) {
@@ -231,6 +338,7 @@
   function setLanguage(lang) {
     if (!LOREM_BANKS[lang]) return;
     state.language = lang;
+    _soFillerCache = {};
     H.set(KEY_LANGUAGE, lang);
 
     /* Update selected state in the language menu. */
@@ -328,10 +436,20 @@
      * propagate them to the mirror so rendering stays consistent. */
     if (typeof MutationObserver !== 'undefined') {
       var observer = new MutationObserver(function () {
-        if (state.enabled) syncMirror();
+        if (state.enabled) {
+          /* Font changed — cached measurements and filler are stale. */
+          invalidateCaches();
+          syncMirror();
+        }
       });
       observer.observe(writer, { attributes: true, attributeFilter: ['class'] });
     }
+
+    /* Viewport resize changes available width and responsive padding. */
+    window.addEventListener('resize', function () {
+      invalidateCaches();
+      if (state.enabled) syncMirror();
+    });
 
     /* Wire the Enable / Disable checkbox. */
     var checkbox = document.getElementById('slackoff-enabled');
